@@ -19,10 +19,13 @@ type emailService struct {
 	logger *zap.Logger
 }
 
-func NewEmailService(logger *zap.Logger) *emailService {
+func NewEmailService(logger *zap.Logger) EmailService {
 	ctx := context.Background()
 
-	configOauth, err := google.ConfigFromJSON([]byte(config.Val.Gcp.Secret), gmail.MailGoogleComScope)
+	// Ensure config is loaded
+	config.C()
+
+	configOauth, err := google.ConfigFromJSON([]byte(config.Val.Gcp.Secret), gmail.GmailSendScope)
 	if err != nil {
 		logger.Error(err.Error())
 	}
@@ -40,11 +43,12 @@ func NewEmailService(logger *zap.Logger) *emailService {
 		logger.Error(err.Error())
 	}
 	return &emailService{
-		srv: service,
+		srv:    service,
+		logger: logger,
 	}
 }
 
-func SendIndividualEmail(srv *gmail.Service, email, subject, contentType string, message string) error {
+func (s *emailService) SendIndividualEmail(email, subject, contentType string, message string) error {
 	rawMessage := []byte("To: " + email + "\r\n" +
 		"Subject: " + subject + "\r\n" +
 		"Content-Type: " + contentType + "; charset=UTF-8\r\n" +
@@ -57,6 +61,6 @@ func SendIndividualEmail(srv *gmail.Service, email, subject, contentType string,
 	msg := &gmail.Message{
 		Raw: raw,
 	}
-	_, err := srv.Users.Messages.Send("me", msg).Do()
+	_, err := s.srv.Users.Messages.Send("me", msg).Do()
 	return err
 }
