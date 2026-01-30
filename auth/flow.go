@@ -11,6 +11,7 @@ import (
 	"github.com/Lect1val/go-google-utils/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -22,12 +23,37 @@ func GenerateTokenInteractive(tokenOutputPath string) error {
 	config.C()
 	b := []byte(config.Val.Gcp.Secret)
 
-	config, err := google.ConfigFromJSON(b, gmail.GmailSendScope)
+	cfg, err := google.ConfigFromJSON(b, gmail.GmailSendScope)
 	if err != nil {
 		return err
 	}
 
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	return runInteractiveTokenFlow(cfg, tokenOutputPath)
+}
+
+// GenerateCalendarTokenInteractive runs an interactive OAuth flow using the
+// Google Calendar scope and saves the resulting token JSON to the given path.
+func GenerateCalendarTokenInteractive(tokenOutputPath string) error {
+	// Ensure config is loaded and read client secret from env-backed config
+	config.C()
+	b := []byte(config.Val.Gcp.Secret)
+
+	cfg, err := google.ConfigFromJSON(b, calendar.CalendarScope)
+	if err != nil {
+		return err
+	}
+
+	return runInteractiveTokenFlow(cfg, tokenOutputPath)
+}
+
+// runInteractiveTokenFlow is a helper that performs the common OAuth code
+// exchange and token persistence for a given OAuth2 config.
+func runInteractiveTokenFlow(cfg *oauth2.Config, tokenOutputPath string) error {
+	authURL := cfg.AuthCodeURL(
+		"state-token",
+		oauth2.AccessTypeOffline,
+		oauth2.SetAuthURLParam("prompt", "consent"), // force refresh_token issuance
+	)
 	fmt.Printf("Visit this URL, authorize, and paste the code here:\n%v\n", authURL)
 
 	reader := bufio.NewReader(os.Stdin)
@@ -38,7 +64,7 @@ func GenerateTokenInteractive(tokenOutputPath string) error {
 	}
 	code = strings.TrimSpace(code)
 
-	tok, err := config.Exchange(context.Background(), code)
+	tok, err := cfg.Exchange(context.Background(), code)
 	if err != nil {
 		return err
 	}

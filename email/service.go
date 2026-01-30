@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"os"
 	"strings"
 
 	"github.com/Lect1val/go-google-utils/config"
@@ -19,6 +20,66 @@ type emailService struct {
 	logger *zap.Logger
 }
 
+const tokenFilePath = "token.json"
+
+// persistingTokenSource wraps an oauth2.TokenSource, ensuring any refreshed
+// tokens are written to disk so subsequent runs reuse the latest token.
+type persistingTokenSource struct {
+	inner           oauth2.TokenSource
+	path            string
+	logger          *zap.Logger
+	refreshFallback string
+}
+
+func (p *persistingTokenSource) Token() (*oauth2.Token, error) {
+	tok, err := p.inner.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	// Google often omits refresh_token on refresh; persist the original one.
+	if tok.RefreshToken == "" && p.refreshFallback != "" {
+		tok.RefreshToken = p.refreshFallback
+	}
+
+	// Save token to disk atomically.
+	b, err := json.Marshal(tok)
+	if err == nil {
+		// Best-effort write; log on error but don't fail the request path.
+		if writeErr := os.WriteFile(p.path, b, 0o600); writeErr != nil {
+			p.logger.Warn("failed to persist refreshed OAuth token", zap.Error(writeErr))
+		}
+	}
+
+	return tok, nil
+}
+
+func loadToken(logger *zap.Logger) (*oauth2.Token, string, error) {
+	// Prefer file if present so we can reuse refreshed tokens across restarts.
+	// if _, err := os.Stat(tokenFilePath); err == nil {
+	// 	b, readErr := os.ReadFile(tokenFilePath)
+	// 	if readErr == nil {
+	// 		var t oauth2.Token
+	// 		if err := json.Unmarshal(b, &t); err == nil {
+	// 			return &t, t.RefreshToken, nil
+	// 		} else {
+	// 			logger.Warn("failed to parse token.json; falling back to env", zap.Error(err))
+	// 		}
+	// 	}
+	// }
+
+	// Fall back to env variable if provided.
+	if config.Val.Gcp.Token != "" {
+		var t oauth2.Token
+		if err := json.Unmarshal([]byte(config.Val.Gcp.Token), &t); err != nil {
+			return nil, "", err
+		}
+		return &t, t.RefreshToken, nil
+	}
+
+	return nil, "", os.ErrNotExist
+}
+
 func NewEmailService(logger *zap.Logger) EmailService {
 	ctx := context.Background()
 
@@ -30,13 +91,16 @@ func NewEmailService(logger *zap.Logger) EmailService {
 		logger.Error(err.Error())
 	}
 
-	var token oauth2.Token
-	err = json.Unmarshal([]byte(config.Val.Gcp.Token), &token)
+	// Load token from file (preferred) or env, and create a persisting TokenSource
+	// so refreshed tokens are saved to disk.
+	token, refreshFallback, err := loadToken(logger)
 	if err != nil {
-		logger.Error(err.Error())
+		logger.Error("failed to load OAuth token; ensure initial authorization was completed", zap.Error(err))
 	}
 
-	client := configOauth.Client(ctx, &token)
+	ts := configOauth.TokenSource(ctx, token)
+	pts := &persistingTokenSource{inner: ts, path: tokenFilePath, logger: logger, refreshFallback: refreshFallback}
+	client := oauth2.NewClient(ctx, pts)
 
 	service, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
